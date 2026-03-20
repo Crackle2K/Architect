@@ -12,6 +12,7 @@ import logging
 import msvcrt
 import os
 from advanced_detection import AdvancedDetector, TaskRecognizer
+from role_detector import RoleDetector, Role, RoleDetectionResult
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -22,16 +23,20 @@ class EnhancedAmongUsBot:
         self.camera = dxcam.create()
         self.detector = AdvancedDetector()
         self.task_recognizer = TaskRecognizer()
+        self.role_detector = RoleDetector(debug_screenshots=False)
         self.window_region = None  # (left, top, right, bottom) of game window
 
         self.running = True
         self.bot_active = False
-        
+
         # Game state
         self.state = None
         self.is_impostor = False
         self.is_dead = False
         self.in_voting = False
+        self._last_role_result: RoleDetectionResult = RoleDetectionResult(
+            Role.UNKNOWN, 0.0, "unknown"
+        )
         
         # Player tracking
         self.my_position = None
@@ -81,16 +86,16 @@ class EnhancedAmongUsBot:
         else:
             self.is_dead = self.detector.detect_dead_players(frame)
 
-        # Role detection: only re-read when transitioning INTO the game
-        # (the role assignment screen). During voting the red X marks and
-        # UI flood the region and produce wrong results.
+        # Role detection: run on every frame that looks like a reveal screen,
+        # but only accept a result once per round (cache until next round).
+        # Skip during voting/dead to avoid false positives from UI overlays.
         if not self.in_voting and not self.is_dead:
-            if prev_state != 'in_game' and self.state == 'in_game':
-                # Just entered the game — read role fresh
-                impostor_confidence = self.detector.detect_impostor_indicators(frame)
-                self.is_impostor = impostor_confidence > 0.6
-            # If already in_game, keep the cached role
-        # (self.is_impostor keeps its last good value)
+            if self.role_detector.is_reveal_screen(frame):
+                result = self.role_detector.detect(frame)
+                if result.role != Role.UNKNOWN:
+                    self._last_role_result = result
+                    self.is_impostor = (result.role == Role.IMPOSTOR)
+                    logger.info(f"Role locked: {result}")
 
         # Detect all players (capped to 1 per color so max ~8)
         self.all_players = self.detector.detect_player_positions(frame)
@@ -153,7 +158,13 @@ class EnhancedAmongUsBot:
     
     def print_stats(self):
         """Print current bot statistics to the console, overwriting the previous stats block."""
-        role_text  = "IMPOSTOR" if self.is_impostor else "CREWMATE"
+        r = self._last_role_result
+        role_text = (
+            f"{r.role.value.upper()}  "
+            f"(conf={r.confidence:.2f} via={r.method})"
+            if r.role.value != "unknown"
+            else "UNKNOWN"
+        )
         state_text = self.state or "unknown"
         status     = "ACTIVE"   if self.bot_active  else "PAUSED"
         flags = []

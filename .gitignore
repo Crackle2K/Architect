@@ -1,0 +1,15 @@
+# Environment
+.env
+
+# Build output
+discord-cli
+discord-cli.exe
+
+# Go
+*.test
+*.out
+vendor/
+
+# OS
+.DS_Store
+Thumbs.db

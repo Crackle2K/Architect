@@ -1,3 +1,3 @@
-module discord-cli
+module architect
 
 go 1.21

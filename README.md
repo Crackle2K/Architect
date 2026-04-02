@@ -1,4 +1,4 @@
-# discord-cli
+# Architect
 
 A command-line interface for Discord that lets you send direct messages to friends from your terminal.
 

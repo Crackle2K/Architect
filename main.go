@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"discord-cli/discord"
+	"architect/discord"
 )
 
 func loadDotEnv() {

@@ -1,4 +1,4 @@
-use std::{path::Path, process::Stdio, sync::Arc};
+use std::{path::Path, process::Stdio, sync::Arc, time::UNIX_EPOCH};
 
 use futures_util::StreamExt;
 use tauri::{AppHandle, Emitter};
@@ -7,6 +7,8 @@ use tokio::{
     sync::Mutex,
 };
 use uuid::Uuid;
+
+use tauri_plugin_opener::OpenerExt;
 
 use crate::{
     models::*,
@@ -942,4 +944,151 @@ async fn ping_server(port: u16) -> Result<PlayersResult, Box<dyn std::error::Err
         .unwrap_or_default();
 
     Ok(PlayersResult { online, max, sample })
+}
+
+// ─── file manager ─────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_server_files(
+    id: String,
+    subpath: Option<String>,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<FileEntry>, String> {
+    let server_dir = state.server_dir(&id);
+    let sub = subpath.as_deref().filter(|s| !s.is_empty());
+
+    let target_dir = match sub {
+        Some(s) => {
+            let candidate = server_dir.join(s);
+            let canonical_server = server_dir.canonicalize().map_err(|e| e.to_string())?;
+            let canonical_target = candidate.canonicalize().map_err(|e| e.to_string())?;
+            if !canonical_target.starts_with(&canonical_server) {
+                return Err("path traversal not allowed".to_string());
+            }
+            canonical_target
+        }
+        None => server_dir.clone(),
+    };
+
+    let mut rd = tokio::fs::read_dir(&target_dir).await.map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let Ok(metadata) = entry.metadata().await else { continue; };
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = match sub {
+            Some(s) => format!("{}/{}", s, name),
+            None => name.clone(),
+        };
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .and_then(|d| {
+                use chrono::TimeZone;
+                chrono::Utc.timestamp_opt(d.as_secs() as i64, 0).single()
+            })
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+
+        result.push(FileEntry {
+            name,
+            path,
+            is_dir: metadata.is_dir(),
+            size: metadata.len(),
+            modified,
+        });
+    }
+
+    result.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then(a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+    });
+
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn read_server_file(
+    id: String,
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, String> {
+    let server_dir = state.server_dir(&id);
+    let file_path = server_dir.join(&path);
+    let canonical_server = server_dir.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_file = file_path.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_file.starts_with(&canonical_server) {
+        return Err("path traversal not allowed".to_string());
+    }
+    tokio::fs::read_to_string(&canonical_file)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn write_server_file(
+    id: String,
+    path: String,
+    content: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let server_dir = state.server_dir(&id);
+    let file_path = server_dir.join(&path);
+    let canonical_server = server_dir.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_parent = file_path
+        .parent()
+        .ok_or("invalid path")?
+        .canonicalize()
+        .map_err(|e| e.to_string())?;
+    if !canonical_parent.starts_with(&canonical_server) {
+        return Err("path traversal not allowed".to_string());
+    }
+    tokio::fs::write(&file_path, content)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_server_file(
+    id: String,
+    path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let server_dir = state.server_dir(&id);
+    let file_path = server_dir.join(&path);
+    let canonical_server = server_dir.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_file = file_path.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_file.starts_with(&canonical_server) {
+        return Err("path traversal not allowed".to_string());
+    }
+    if canonical_file.is_dir() {
+        tokio::fs::remove_dir_all(&canonical_file).await.map_err(|e| e.to_string())
+    } else {
+        tokio::fs::remove_file(&canonical_file).await.map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn open_server_file(
+    id: String,
+    path: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<(), String> {
+    let server_dir = state.server_dir(&id);
+    let target = match path.as_deref().filter(|s| !s.is_empty()) {
+        Some(p) => server_dir.join(p),
+        None => server_dir.clone(),
+    };
+    let canonical_server = server_dir.canonicalize().map_err(|e| e.to_string())?;
+    let canonical_target = target.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_target.starts_with(&canonical_server) {
+        return Err("path traversal not allowed".to_string());
+    }
+    app_handle
+        .opener()
+        .open_path(canonical_target.to_string_lossy(), None::<&str>)
+        .map_err(|e| e.to_string())
 }

@@ -30,6 +30,11 @@ pub fn run() {
             commands::send_command,
             commands::get_server_status,
             commands::query_players,
+            commands::list_server_files,
+            commands::read_server_file,
+            commands::write_server_file,
+            commands::delete_server_file,
+            commands::open_server_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -89,3 +89,12 @@ pub struct PlayersResult {
     pub max: u32,
     pub sample: Vec<PlayerInfo>,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FileEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified: String,
+}

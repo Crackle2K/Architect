@@ -7,18 +7,24 @@ const ICON_SRC: Record<ServerType, string> = {
   forge: "/icons/forge.jpg",
 };
 
+// Fabric's logo has more internal whitespace — scale it up to visually match the others.
+const ICON_SCALE: Partial<Record<ServerType, number>> = {
+  fabric: 1.22,
+};
+
 interface Props {
   type: ServerType;
   size?: number;
 }
 
 export default function ServerTypeIcon({ type, size = 28 }: Props) {
+  const renderSize = Math.round(size * (ICON_SCALE[type] ?? 1));
   return (
     <img
       src={ICON_SRC[type] ?? "/icons/vanilla.png"}
       alt={type}
-      width={size}
-      height={size}
+      width={renderSize}
+      height={renderSize}
       style={{ borderRadius: 4, objectFit: "contain" }}
     />
   );

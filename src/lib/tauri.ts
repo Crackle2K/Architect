@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CreateServerRequest,
+  FileEntry,
   McVersion,
   PlayersResult,
   ServerConfig,
@@ -38,3 +39,18 @@ export const getMcVersions = (serverType: ServerType): Promise<McVersion[]> =>
 
 export const queryPlayers = (id: string): Promise<PlayersResult> =>
   invoke("query_players", { id });
+
+export const listServerFiles = (id: string, subpath: string | null): Promise<FileEntry[]> =>
+  invoke("list_server_files", { id, subpath });
+
+export const readServerFile = (id: string, path: string): Promise<string> =>
+  invoke("read_server_file", { id, path });
+
+export const writeServerFile = (id: string, path: string, content: string): Promise<void> =>
+  invoke("write_server_file", { id, path, content });
+
+export const deleteServerFile = (id: string, path: string): Promise<void> =>
+  invoke("delete_server_file", { id, path });
+
+export const openServerFile = (id: string, path: string | null): Promise<void> =>
+  invoke("open_server_file", { id, path });

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { listen } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
+  FolderOpen,
   Play,
   RefreshCw,
   Square,
@@ -10,6 +11,7 @@ import {
   Users,
 } from "lucide-react";
 import type { LogEvent, PlayerInfo, ServerInfo, StatusEvent } from "../types";
+import FileManager from "../components/FileManager";
 import ServerTypeIcon from "../components/ServerTypeIcon";
 import {
   listServers,
@@ -21,7 +23,7 @@ import {
 } from "../lib/tauri";
 import StatusBadge from "../components/StatusBadge";
 
-type Tab = "console" | "players";
+type Tab = "console" | "players" | "files";
 
 const LOG_COLORS: Record<string, string> = {
   ERROR: "#ef4444",
@@ -248,7 +250,7 @@ export default function ServerView() {
           flexShrink: 0,
         }}
       >
-        {(["console", "players"] as Tab[]).map((t) => (
+        {(["console", "players", "files"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -269,7 +271,13 @@ export default function ServerView() {
               marginBottom: -1,
             }}
           >
-            {t === "console" ? <Terminal size={14} /> : <Users size={14} />}
+            {t === "console" ? (
+              <Terminal size={14} />
+            ) : t === "players" ? (
+              <Users size={14} />
+            ) : (
+              <FolderOpen size={14} />
+            )}
             {t}
             {t === "players" && (
               <span
@@ -290,7 +298,9 @@ export default function ServerView() {
 
       {/* Tab content */}
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        {tab === "console" ? (
+        {tab === "files" ? (
+          <FileManager serverId={id!} />
+        ) : tab === "console" ? (
           <>
             {/* Log area */}
             <div

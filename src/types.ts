@@ -61,3 +61,11 @@ export interface PlayersResult {
   max: number;
   sample: PlayerInfo[];
 }
+
+export interface FileEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  size: number;
+  modified: string;
+}

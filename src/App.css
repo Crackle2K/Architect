@@ -1,0 +1,59 @@
+@import "tailwindcss";
+
+@theme {
+  --color-surface-0: #0d0e11;
+  --color-surface-1: #15171c;
+  --color-surface-2: #1e2128;
+  --color-surface-3: #272b34;
+  --color-border: #2e323d;
+  --color-border-hover: #3d4251;
+
+  --color-orange-primary: #f97316;
+  --color-orange-hover: #fb923c;
+  --color-orange-muted: #7c3f12;
+  --color-orange-subtle: #1c1108;
+
+  --color-text-primary: #e8eaf0;
+  --color-text-secondary: #9ba3b5;
+  --color-text-muted: #5d6475;
+
+  --color-status-green: #22c55e;
+  --color-status-yellow: #eab308;
+  --color-status-red: #ef4444;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: var(--color-surface-0);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  font-size: 14px;
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-hover);
+}

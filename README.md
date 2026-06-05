@@ -1,4 +1,4 @@
-# Launchstone
+![Banner](https://i.imgur.com/Txnw4YJ.png)
 
 A desktop app for managing Minecraft Java Edition servers, built with Tauri 2, React 19, and Rust.
 

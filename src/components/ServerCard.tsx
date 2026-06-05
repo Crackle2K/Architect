@@ -3,13 +3,7 @@ import { useNavigate } from "react-router-dom";
 import type { ServerInfo } from "../types";
 import { startServer, stopServer } from "../lib/tauri";
 import StatusBadge from "./StatusBadge";
-
-const TYPE_ICONS: Record<string, string> = {
-  vanilla: "🟫",
-  paper: "📄",
-  fabric: "🧵",
-  forge: "🔨",
-};
+import ServerTypeIcon from "./ServerTypeIcon";
 
 interface Props {
   server: ServerInfo;
@@ -77,11 +71,10 @@ export default function ServerCard({ server, onRefresh, onDelete }: Props) {
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
-            fontSize: 22,
             flexShrink: 0,
           }}
         >
-          {TYPE_ICONS[server.server_type] ?? "🖥"}
+          <ServerTypeIcon type={server.server_type} size={28} />
         </div>
 
         <div style={{ flex: 1, minWidth: 0 }}>

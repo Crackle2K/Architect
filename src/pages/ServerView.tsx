@@ -10,6 +10,7 @@ import {
   Users,
 } from "lucide-react";
 import type { LogEvent, PlayerInfo, ServerInfo, StatusEvent } from "../types";
+import ServerTypeIcon from "../components/ServerTypeIcon";
 import {
   listServers,
   queryPlayers,
@@ -176,13 +177,7 @@ export default function ServerView() {
             fontSize: 20,
           }}
         >
-          {server.server_type === "vanilla"
-            ? "🟫"
-            : server.server_type === "paper"
-            ? "📄"
-            : server.server_type === "fabric"
-            ? "🧵"
-            : "🔨"}
+          <ServerTypeIcon type={server.server_type} size={28} />
         </div>
 
         <div style={{ flex: 1 }}>

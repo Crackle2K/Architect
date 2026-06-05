@@ -3,17 +3,18 @@ import { listen } from "@tauri-apps/api/event";
 import { X, ChevronRight, ChevronLeft, Loader } from "lucide-react";
 import type { CreateServerRequest, DownloadProgress, McVersion, ServerType } from "../types";
 import { createServer, getMcVersions } from "../lib/tauri";
+import ServerTypeIcon from "./ServerTypeIcon";
 
 interface Props {
   onClose: () => void;
   onCreated: () => void;
 }
 
-const SERVER_TYPES: { id: ServerType; label: string; icon: string; desc: string }[] = [
-  { id: "vanilla", label: "Vanilla", icon: "🟫", desc: "Official Mojang server. No mods." },
-  { id: "paper", label: "Paper", icon: "📄", desc: "High-performance fork. Great for plugins." },
-  { id: "fabric", label: "Fabric", icon: "🧵", desc: "Lightweight mod loader." },
-  { id: "forge", label: "Forge", icon: "🔨", desc: "The classic mod loader. Huge ecosystem." },
+const SERVER_TYPES: { id: ServerType; label: string; desc: string }[] = [
+  { id: "vanilla", label: "Vanilla", desc: "Official Mojang server. No mods." },
+  { id: "paper", label: "Paper", desc: "High-performance fork. Great for plugins." },
+  { id: "fabric", label: "Fabric", desc: "Lightweight mod loader." },
+  { id: "forge", label: "Forge", desc: "The classic mod loader. Huge ecosystem." },
 ];
 
 const RAM_OPTIONS = [512, 1024, 2048, 4096, 8192];
@@ -244,7 +245,7 @@ export default function CreateServerModal({ onClose, onCreated }: Props) {
                     transition: "all 0.15s",
                   }}
                 >
-                  <div style={{ fontSize: 22 }}>{t.icon}</div>
+                  <ServerTypeIcon type={t.id} size={32} />
                   <div style={{ fontSize: 13, fontWeight: 600, color: "var(--color-text-primary)", marginTop: 6 }}>
                     {t.label}
                   </div>

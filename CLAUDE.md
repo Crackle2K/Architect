@@ -13,6 +13,10 @@ npm run tauri dev
 
 Or open the terminal from within MSYS2 where ucrt64 is already on PATH.
 
+**Known build quirks:**
+- `crate-type` must stay as `["rlib"]` only — adding `cdylib` causes `export ordinal too large` (GNU ld limit of 65535). `cdylib` is only needed for Android, not desktop.
+- MSVC toolchain cannot be used because Visual Studio / Build Tools are not installed on this machine.
+
 ## Project structure
 
 ```

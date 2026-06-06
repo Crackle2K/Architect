@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppSettings,
   CreateServerRequest,
   FileEntry,
   McVersion,
@@ -54,3 +55,15 @@ export const deleteServerFile = (id: string, path: string): Promise<void> =>
 
 export const openServerFile = (id: string, path: string | null): Promise<void> =>
   invoke("open_server_file", { id, path });
+
+export const getSettings = (): Promise<AppSettings> =>
+  invoke("get_settings");
+
+export const saveSettings = (settings: AppSettings): Promise<void> =>
+  invoke("save_settings", { settings });
+
+export const getDataDir = (): Promise<string> =>
+  invoke("get_data_dir");
+
+export const openPath = (path: string): Promise<void> =>
+  invoke("open_path", { path });

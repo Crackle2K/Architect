@@ -1,4 +1,4 @@
-export type ServerType = "vanilla" | "paper" | "fabric" | "forge";
+export type ServerType = "vanilla" | "paper" | "fabric" | "forge" | "quilt" | "neoforge";
 export type ServerStatus = "stopped" | "starting" | "running" | "stopping";
 
 export interface ServerConfig {
@@ -68,4 +68,11 @@ export interface FileEntry {
   is_dir: boolean;
   size: number;
   modified: string;
+}
+
+export interface AppSettings {
+  java_path: string;
+  default_ram_mb: number;
+  default_port: number;
+  show_snapshots: boolean;
 }

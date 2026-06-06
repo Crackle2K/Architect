@@ -17,8 +17,12 @@ use crate::{
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
-fn find_java() -> Result<String, String> {
-    // Check JAVA_HOME first
+fn find_java(override_path: Option<&str>) -> Result<String, String> {
+    if let Some(p) = override_path {
+        if !p.is_empty() && Path::new(p).exists() {
+            return Ok(p.to_string());
+        }
+    }
     if let Ok(java_home) = std::env::var("JAVA_HOME") {
         let candidate = if cfg!(windows) {
             format!("{}\\bin\\java.exe", java_home)
@@ -29,8 +33,18 @@ fn find_java() -> Result<String, String> {
             return Ok(candidate);
         }
     }
-    // Fall back to PATH
     Ok("java".to_string())
+}
+
+async fn load_java_path(state: &tauri::State<'_, AppState>) -> String {
+    let path = state.settings_path();
+    if !path.exists() {
+        return String::new();
+    }
+    let raw = tokio::fs::read_to_string(&path).await.unwrap_or_default();
+    serde_json::from_str::<AppSettings>(&raw)
+        .map(|s| s.java_path)
+        .unwrap_or_default()
 }
 
 fn parse_log_level(line: &str) -> &str {
@@ -51,8 +65,8 @@ fn build_server_command(
     let max_ram = format!("-Xmx{}M", config.max_ram_mb);
     let min_ram = format!("-Xms{}M", std::cmp::min(config.max_ram_mb, 512));
 
-    let mut cmd = match &config.server_type {
-        ServerType::Forge => {
+    let cmd = match &config.server_type {
+        ServerType::Forge | ServerType::Neoforge => {
             let run_bat = server_dir.join("run.bat");
             if cfg!(windows) && run_bat.exists() {
                 let mut c = tokio::process::Command::new("cmd");
@@ -65,14 +79,13 @@ fn build_server_command(
                 c.args(["run.sh"]);
                 return Ok(c);
             }
-            let forge_jar = std::fs::read_dir(server_dir)
+            let prefix = if config.server_type == ServerType::Neoforge { "neoforge" } else { "forge" };
+            let jar = std::fs::read_dir(server_dir)
                 .map_err(|e| e.to_string())?
                 .filter_map(|e| e.ok())
                 .map(|e| e.file_name().to_string_lossy().to_string())
-                .find(|n| n.starts_with("forge") && n.ends_with(".jar") && !n.contains("installer"));
-
-            let jar = forge_jar
-                .ok_or_else(|| "Forge server files not found. Installation may have failed.".to_string())?;
+                .find(|n| n.starts_with(prefix) && n.ends_with(".jar") && !n.contains("installer"))
+                .ok_or_else(|| format!("{} server files not found. Installation may have failed.", prefix))?;
             let mut c = tokio::process::Command::new(java);
             c.args([&max_ram, &min_ram, "-jar", &jar, "nogui"]);
             c
@@ -80,6 +93,11 @@ fn build_server_command(
         ServerType::Fabric => {
             let mut c = tokio::process::Command::new(java);
             c.args([&max_ram, &min_ram, "-jar", "fabric-server-launch.jar", "nogui"]);
+            c
+        }
+        ServerType::Quilt => {
+            let mut c = tokio::process::Command::new(java);
+            c.args([&max_ram, &min_ram, "-jar", "quilt-server-launch.jar", "nogui"]);
             c
         }
         _ => {
@@ -236,8 +254,76 @@ pub async fn get_minecraft_versions(server_type: ServerType) -> Result<Vec<McVer
                     }
                 })
                 .collect();
-            // Sort descending
             versions.sort_by(|a, b| b.id.cmp(&a.id));
+            Ok(versions)
+        }
+        ServerType::Quilt => {
+            let resp: serde_json::Value =
+                reqwest::get("https://meta.quiltmc.org/v3/versions/game")
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .json()
+                    .await
+                    .map_err(|e| e.to_string())?;
+            let versions = resp
+                .as_array()
+                .ok_or("invalid quilt response")?
+                .iter()
+                .filter_map(|v| {
+                    Some(McVersion {
+                        id: v["version"].as_str()?.to_string(),
+                        release_type: if v["stable"].as_bool().unwrap_or(false) {
+                            "release".to_string()
+                        } else {
+                            "snapshot".to_string()
+                        },
+                    })
+                })
+                .collect();
+            Ok(versions)
+        }
+        ServerType::Neoforge => {
+            let xml = reqwest::get(
+                "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml",
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .text()
+            .await
+            .map_err(|e| e.to_string())?;
+
+            // Track each MC version and whether a stable NeoForge exists for it
+            let mut stable_for_mc: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+
+            for neo_ver in xml.split("<version>").skip(1).filter_map(|s| s.split("</version>").next()) {
+                let parts: Vec<&str> = neo_ver.splitn(3, '.').collect();
+                if parts.len() < 2 { continue; }
+                let mc_ver = if parts[1] == "0" {
+                    format!("1.{}", parts[0])
+                } else {
+                    format!("1.{}.{}", parts[0], parts[1])
+                };
+                let is_stable = !neo_ver.contains("beta") && !neo_ver.contains("rc") && !neo_ver.contains("alpha");
+                let entry = stable_for_mc.entry(mc_ver).or_insert(false);
+                if is_stable { *entry = true; }
+            }
+
+            let mut versions: Vec<McVersion> = stable_for_mc
+                .into_iter()
+                .map(|(id, stable)| McVersion {
+                    id,
+                    release_type: if stable { "release" } else { "snapshot" }.to_string(),
+                })
+                .collect();
+
+            versions.sort_by(|a, b| {
+                let parse = |s: &str| -> (u32, u32, u32) {
+                    let p: Vec<u32> = s.split('.').filter_map(|x| x.parse().ok()).collect();
+                    (p.first().copied().unwrap_or(0), p.get(1).copied().unwrap_or(0), p.get(2).copied().unwrap_or(0))
+                };
+                parse(&b.id).cmp(&parse(&a.id))
+            });
             Ok(versions)
         }
     }
@@ -304,7 +390,8 @@ pub async fn create_server(
         .map_err(|e| e.to_string())?;
 
     // Download the server jar
-    let jar_name = download_server_jar(&req, &id, &server_dir, &app_handle).await?;
+    let java_path = load_java_path(&state).await;
+    let jar_name = download_server_jar(&req, &id, &server_dir, &app_handle, &java_path).await?;
 
     // Write eula.txt
     tokio::fs::write(server_dir.join("eula.txt"), "eula=true\n")
@@ -339,11 +426,73 @@ pub async fn create_server(
     Ok(config)
 }
 
+async fn run_installer(
+    server_id: &str,
+    server_dir: &Path,
+    installer_name: &str,
+    installing_msg: &str,
+    failure_msg: &str,
+    app_handle: &AppHandle,
+    java_path: &str,
+) -> Result<(), String> {
+    app_handle
+        .emit(
+            "download-progress",
+            &DownloadProgress {
+                server_id: server_id.to_string(),
+                downloaded: 0,
+                total: 0,
+                message: installing_msg.to_string(),
+            },
+        )
+        .ok();
+
+    let java = find_java(if java_path.is_empty() { None } else { Some(java_path) })?;
+    let mut install_cmd = tokio::process::Command::new(&java);
+    install_cmd.args(["-jar", installer_name, "--installServer"]);
+    install_cmd.current_dir(server_dir);
+    install_cmd.stdout(Stdio::piped());
+    install_cmd.stderr(Stdio::piped());
+
+    #[cfg(all(windows, not(target_env = "gnu")))]
+    {
+        use std::os::windows::process::CommandExt;
+        install_cmd.creation_flags(0x08000000);
+    }
+
+    let mut child = install_cmd.spawn().map_err(|e| e.to_string())?;
+    let stdout = child.stdout.take().unwrap();
+    let mut reader = BufReader::new(stdout).lines();
+    let app_clone = app_handle.clone();
+    let sid = server_id.to_string();
+    tokio::spawn(async move {
+        while let Ok(Some(line)) = reader.next_line().await {
+            app_clone
+                .emit(
+                    "download-progress",
+                    &DownloadProgress {
+                        server_id: sid.clone(),
+                        downloaded: 0,
+                        total: 0,
+                        message: line,
+                    },
+                )
+                .ok();
+        }
+    });
+    let status = child.wait().await.map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err(failure_msg.to_string());
+    }
+    Ok(())
+}
+
 async fn download_server_jar(
     req: &CreateServerRequest,
     server_id: &str,
     server_dir: &Path,
     app_handle: &AppHandle,
+    java_path: &str,
 ) -> Result<String, String> {
     match &req.server_type {
         ServerType::Vanilla => {
@@ -510,57 +659,92 @@ async fn download_server_jar(
             )
             .await?;
 
-            // Run the installer
-            app_handle
-                .emit(
-                    "download-progress",
-                    &DownloadProgress {
-                        server_id: server_id.to_string(),
-                        downloaded: 0,
-                        total: 0,
-                        message: "Installing Forge (this may take a minute)...".to_string(),
-                    },
-                )
-                .ok();
+            run_installer(server_id, server_dir, &installer_name, "Installing Forge (this may take a minute)...", "Forge installation failed", app_handle, java_path).await?;
+            Ok(installer_name)
+        }
+        ServerType::Quilt => {
+            let loaders: serde_json::Value = reqwest::get(format!(
+                "https://meta.quiltmc.org/v3/versions/loader/{}",
+                req.minecraft_version
+            ))
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
 
-            let java = find_java()?;
-            let mut install_cmd = tokio::process::Command::new(&java);
-            install_cmd.args(["-jar", &installer_name, "--installServer"]);
-            install_cmd.current_dir(server_dir);
-            install_cmd.stdout(Stdio::piped());
-            install_cmd.stderr(Stdio::piped());
+            let loader_version = loaders
+                .as_array()
+                .and_then(|a| a.first())
+                .and_then(|v| v["loader"]["version"].as_str().map(String::from))
+                .ok_or("no Quilt loader found for this version")?;
 
-            #[cfg(all(windows, not(target_env = "gnu")))]
-            {
-                use std::os::windows::process::CommandExt;
-                install_cmd.creation_flags(0x08000000);
-            }
+            let url = format!(
+                "https://meta.quiltmc.org/v3/versions/loader/{}/{}/server/jar",
+                req.minecraft_version, loader_version
+            );
+            let jar_name = "quilt-server-launch.jar".to_string();
+            download_file_with_progress(
+                &url,
+                &server_dir.join(&jar_name),
+                server_id,
+                "Downloading Quilt server...",
+                app_handle,
+            )
+            .await?;
+            Ok(jar_name)
+        }
+        ServerType::Neoforge => {
+            let xml = reqwest::get(
+                "https://maven.neoforged.net/releases/net/neoforged/neoforge/maven-metadata.xml",
+            )
+            .await
+            .map_err(|e| e.to_string())?
+            .text()
+            .await
+            .map_err(|e| e.to_string())?;
 
-            let mut child = install_cmd.spawn().map_err(|e| e.to_string())?;
-            let stdout = child.stdout.take().unwrap();
-            let mut reader = BufReader::new(stdout).lines();
-            let app_clone = app_handle.clone();
-            let sid = server_id.to_string();
-            tokio::spawn(async move {
-                while let Ok(Some(line)) = reader.next_line().await {
-                    app_clone
-                        .emit(
-                            "download-progress",
-                            &DownloadProgress {
-                                server_id: sid.clone(),
-                                downloaded: 0,
-                                total: 0,
-                                message: line,
-                            },
-                        )
-                        .ok();
-                }
-            });
-            let status = child.wait().await.map_err(|e| e.to_string())?;
-            if !status.success() {
-                return Err("Forge installation failed".to_string());
-            }
+            let without_prefix = req.minecraft_version
+                .strip_prefix("1.")
+                .ok_or("invalid MC version format")?;
+            let parts: Vec<&str> = without_prefix.splitn(3, '.').collect();
+            let neo_prefix = match parts.len() {
+                1 => format!("{}.0.", parts[0]),
+                _ => format!("{}.{}.", parts[0], parts[1]),
+            };
 
+            // Prefer stable, fall back to any build
+            let all_matching: Vec<&str> = xml
+                .split("<version>")
+                .skip(1)
+                .filter_map(|s| s.split("</version>").next())
+                .filter(|v| v.starts_with(&neo_prefix))
+                .collect();
+
+            let neo_version = all_matching
+                .iter()
+                .filter(|v| !v.contains("beta") && !v.contains("rc") && !v.contains("alpha"))
+                .last()
+                .or_else(|| all_matching.last())
+                .ok_or_else(|| format!("no NeoForge build for Minecraft {}", req.minecraft_version))?
+                .to_string();
+
+            let installer_name = format!("neoforge-{}-installer.jar", neo_version);
+            let url = format!(
+                "https://maven.neoforged.net/releases/net/neoforged/neoforge/{}/neoforge-{}-installer.jar",
+                neo_version, neo_version
+            );
+
+            download_file_with_progress(
+                &url,
+                &server_dir.join(&installer_name),
+                server_id,
+                "Downloading NeoForge installer...",
+                app_handle,
+            )
+            .await?;
+
+            run_installer(server_id, server_dir, &installer_name, "Installing NeoForge (this may take a minute)...", "NeoForge installation failed", app_handle, java_path).await?;
             Ok(installer_name)
         }
     }
@@ -607,7 +791,8 @@ pub async fn start_server(
         }
     }
 
-    let java = find_java()?;
+    let java_path = load_java_path(&state).await;
+    let java = find_java(if java_path.is_empty() { None } else { Some(&java_path) })?;
     let server_dir = state.server_dir(&id);
     let mut cmd = build_server_command(&java, &config, &server_dir)?;
     cmd.stdin(Stdio::piped());
@@ -1068,6 +1253,39 @@ pub async fn delete_server_file(
     } else {
         tokio::fs::remove_file(&canonical_file).await.map_err(|e| e.to_string())
     }
+}
+
+// ─── settings ────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_settings(state: tauri::State<'_, AppState>) -> Result<AppSettings, String> {
+    let path = state.settings_path();
+    if path.exists() {
+        let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
+    } else {
+        Ok(AppSettings::default())
+    }
+}
+
+#[tauri::command]
+pub async fn save_settings(settings: AppSettings, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let path = state.settings_path();
+    let json = serde_json::to_string_pretty(&settings).map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, json).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_data_dir(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    Ok(state.data_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn open_path(path: String, app_handle: AppHandle) -> Result<(), String> {
+    app_handle
+        .opener()
+        .open_path(&path, None::<&str>)
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

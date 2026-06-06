@@ -3,6 +3,7 @@ import "./App.css";
 import Sidebar from "./components/Sidebar";
 import Home from "./pages/Home";
 import ServerView from "./pages/ServerView";
+import Settings from "./pages/Settings";
 
 function App() {
   return (
@@ -19,6 +20,7 @@ function App() {
           <Routes>
             <Route path="/" element={<Home />} />
             <Route path="/server/:id" element={<ServerView />} />
+            <Route path="/settings" element={<Settings />} />
           </Routes>
         </main>
       </div>

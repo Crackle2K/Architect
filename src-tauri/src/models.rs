@@ -7,6 +7,27 @@ pub enum ServerType {
     Paper,
     Fabric,
     Forge,
+    Quilt,
+    Neoforge,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppSettings {
+    pub java_path: String,
+    pub default_ram_mb: u32,
+    pub default_port: u16,
+    pub show_snapshots: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            java_path: String::new(),
+            default_ram_mb: 2048,
+            default_port: 25565,
+            show_snapshots: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

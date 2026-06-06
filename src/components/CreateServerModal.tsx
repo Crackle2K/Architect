@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { X, ChevronRight, ChevronLeft, Loader } from "lucide-react";
-import type { CreateServerRequest, DownloadProgress, McVersion, ServerType } from "../types";
-import { createServer, getMcVersions } from "../lib/tauri";
+import type { AppSettings, CreateServerRequest, DownloadProgress, McVersion, ServerType } from "../types";
+import { createServer, getMcVersions, getSettings } from "../lib/tauri";
 import ServerTypeIcon from "./ServerTypeIcon";
 
 interface Props {
@@ -14,7 +14,9 @@ const SERVER_TYPES: { id: ServerType; label: string; desc: string }[] = [
   { id: "vanilla", label: "Vanilla", desc: "Official Mojang server. No mods." },
   { id: "paper", label: "Paper", desc: "High-performance fork. Great for plugins." },
   { id: "fabric", label: "Fabric", desc: "Lightweight mod loader." },
+  { id: "quilt", label: "Quilt", desc: "Modern Fabric-compatible loader." },
   { id: "forge", label: "Forge", desc: "The classic mod loader. Huge ecosystem." },
+  { id: "neoforge", label: "NeoForge", desc: "Modern Forge fork. 1.20.2+" },
 ];
 
 const RAM_OPTIONS = [512, 1024, 2048, 4096, 8192];
@@ -25,8 +27,17 @@ export default function CreateServerModal({ onClose, onCreated }: Props) {
   const [serverType, setServerType] = useState<ServerType>("paper");
   const [versions, setVersions] = useState<McVersion[]>([]);
   const [selectedVersion, setSelectedVersion] = useState("");
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [port, setPort] = useState(25565);
   const [ram, setRam] = useState(2048);
+
+  useEffect(() => {
+    getSettings().then((s) => {
+      setAppSettings(s);
+      if (s.default_port) setPort(s.default_port);
+      if (s.default_ram_mb) setRam(s.default_ram_mb);
+    });
+  }, []);
   const [loadingVersions, setLoadingVersions] = useState(false);
   const [creating, setCreating] = useState(false);
   const [progress, setProgress] = useState<DownloadProgress | null>(null);
@@ -39,13 +50,14 @@ export default function CreateServerModal({ onClose, onCreated }: Props) {
     setSelectedVersion("");
     getMcVersions(serverType)
       .then((vs) => {
-        const releases = vs.filter((v) => v.release_type === "release");
-        setVersions(releases);
-        if (releases.length > 0) setSelectedVersion(releases[0].id);
+        const showSnapshots = appSettings?.show_snapshots ?? false;
+        const filtered = showSnapshots ? vs : vs.filter((v) => v.release_type === "release");
+        setVersions(filtered);
+        if (filtered.length > 0) setSelectedVersion(filtered[0].id);
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoadingVersions(false));
-  }, [step, serverType]);
+  }, [step, serverType, appSettings]);
 
   useEffect(() => {
     if (!creating) return;
@@ -226,7 +238,7 @@ export default function CreateServerModal({ onClose, onCreated }: Props) {
             <label style={{ fontSize: 13, fontWeight: 500, color: "var(--color-text-secondary)" }}>
               Server type
             </label>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 }}>
               {SERVER_TYPES.map((t) => (
                 <button
                   key={t.id}

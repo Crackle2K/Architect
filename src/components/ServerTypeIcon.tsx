@@ -5,9 +5,10 @@ const ICON_SRC: Record<ServerType, string> = {
   paper: "/icons/paper.png",
   fabric: "/icons/fabric.png",
   forge: "/icons/forge.jpg",
+  quilt: "/icons/quilt.svg",
+  neoforge: "/icons/neoforge.svg",
 };
 
-// Fabric's logo has more internal whitespace — scale it up to visually match the others.
 const ICON_SCALE: Partial<Record<ServerType, number>> = {
   fabric: 1.22,
 };

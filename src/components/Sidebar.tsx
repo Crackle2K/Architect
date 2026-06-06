@@ -83,25 +83,25 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div style={{ padding: "0 8px" }}>
-        <button
-          style={{
+        <NavLink
+          to="/settings"
+          style={({ isActive }) => ({
             display: "flex",
             alignItems: "center",
             gap: 10,
             padding: "9px 12px",
-            width: "100%",
-            border: "none",
             borderRadius: 8,
-            background: "transparent",
-            color: "var(--color-text-muted)",
+            textDecoration: "none",
             fontSize: 14,
             fontWeight: 500,
-            cursor: "pointer",
-          }}
+            color: isActive ? "var(--color-orange-primary)" : "var(--color-text-secondary)",
+            backgroundColor: isActive ? "var(--color-orange-subtle)" : "transparent",
+            transition: "all 0.15s",
+          })}
         >
           <Settings size={16} />
           Settings
-        </button>
+        </NavLink>
       </div>
     </aside>
   );

@@ -34,4 +34,8 @@ impl AppState {
     pub fn config_path(&self, id: &str) -> PathBuf {
         self.server_dir(id).join("launchstone.json")
     }
+
+    pub fn settings_path(&self) -> PathBuf {
+        self.data_dir.join("settings.json")
+    }
 }

@@ -8,11 +8,14 @@ pub struct ProcessHandle {
     pub stdin: Arc<Mutex<Option<ChildStdin>>>,
     pub status: Arc<std::sync::Mutex<ServerStatus>>,
     pub players: Arc<std::sync::Mutex<(u32, u32)>>,
+    pub pid: Arc<std::sync::Mutex<Option<u32>>>,
+    pub stopping: Arc<std::sync::Mutex<bool>>,
 }
 
 pub struct AppState {
     pub processes: Arc<Mutex<HashMap<String, ProcessHandle>>>,
     pub data_dir: PathBuf,
+    pub sys: Arc<std::sync::Mutex<sysinfo::System>>,
 }
 
 impl AppState {
@@ -20,6 +23,7 @@ impl AppState {
         Self {
             processes: Arc::new(Mutex::new(HashMap::new())),
             data_dir,
+            sys: Arc::new(std::sync::Mutex::new(sysinfo::System::new())),
         }
     }
 
@@ -37,5 +41,9 @@ impl AppState {
 
     pub fn settings_path(&self) -> PathBuf {
         self.data_dir.join("settings.json")
+    }
+
+    pub fn backups_dir(&self, id: &str) -> PathBuf {
+        self.data_dir.join("backups").join(id)
     }
 }

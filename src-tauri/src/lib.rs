@@ -39,6 +39,23 @@ pub fn run() {
             commands::save_settings,
             commands::get_data_dir,
             commands::open_path,
+            // new
+            commands::get_server_resources,
+            commands::list_backups,
+            commands::create_backup,
+            commands::delete_backup,
+            commands::restore_backup,
+            commands::get_server_properties,
+            commands::save_server_properties,
+            commands::get_player_list,
+            commands::add_to_player_list,
+            commands::remove_from_player_list,
+            commands::upload_server_file,
+            commands::get_scheduled_tasks,
+            commands::add_scheduled_task,
+            commands::update_scheduled_task,
+            commands::remove_scheduled_task,
+            commands::update_server,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

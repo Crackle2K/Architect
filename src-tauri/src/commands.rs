@@ -64,6 +64,7 @@ fn build_server_command(
 ) -> Result<tokio::process::Command, String> {
     let max_ram = format!("-Xmx{}M", config.max_ram_mb);
     let min_ram = format!("-Xms{}M", std::cmp::min(config.max_ram_mb, 512));
+    let extra: Vec<String> = config.jvm_flags.split_whitespace().map(String::from).collect();
 
     let cmd = match &config.server_type {
         ServerType::Forge | ServerType::Neoforge => {
@@ -87,22 +88,34 @@ fn build_server_command(
                 .find(|n| n.starts_with(prefix) && n.ends_with(".jar") && !n.contains("installer"))
                 .ok_or_else(|| format!("{} server files not found. Installation may have failed.", prefix))?;
             let mut c = tokio::process::Command::new(java);
-            c.args([&max_ram, &min_ram, "-jar", &jar, "nogui"]);
+            let mut args = vec![max_ram.clone(), min_ram.clone()];
+            args.extend(extra.iter().cloned());
+            args.extend(["-jar".to_string(), jar, "nogui".to_string()]);
+            c.args(args);
             c
         }
         ServerType::Fabric => {
             let mut c = tokio::process::Command::new(java);
-            c.args([&max_ram, &min_ram, "-jar", "fabric-server-launch.jar", "nogui"]);
+            let mut args = vec![max_ram.clone(), min_ram.clone()];
+            args.extend(extra.iter().cloned());
+            args.extend(["-jar".to_string(), "fabric-server-launch.jar".to_string(), "nogui".to_string()]);
+            c.args(args);
             c
         }
         ServerType::Quilt => {
             let mut c = tokio::process::Command::new(java);
-            c.args([&max_ram, &min_ram, "-jar", "quilt-server-launch.jar", "nogui"]);
+            let mut args = vec![max_ram.clone(), min_ram.clone()];
+            args.extend(extra.iter().cloned());
+            args.extend(["-jar".to_string(), "quilt-server-launch.jar".to_string(), "nogui".to_string()]);
+            c.args(args);
             c
         }
         _ => {
             let mut c = tokio::process::Command::new(java);
-            c.args([&max_ram, &min_ram, "-jar", &config.jar_name, "nogui"]);
+            let mut args = vec![max_ram.clone(), min_ram.clone()];
+            args.extend(extra.iter().cloned());
+            args.extend(["-jar".to_string(), config.jar_name.clone(), "nogui".to_string()]);
+            c.args(args);
             c
         }
     };
@@ -416,6 +429,8 @@ pub async fn create_server(
         max_ram_mb: req.max_ram_mb,
         created_at: chrono::Utc::now().to_rfc3339(),
         jar_name,
+        auto_restart: req.auto_restart,
+        jvm_flags: req.jvm_flags,
     };
 
     let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
@@ -802,11 +817,14 @@ pub async fn start_server(
 
     let mut child = cmd.spawn().map_err(|e| format!("failed to spawn Java: {}", e))?;
 
+    let child_pid = child.id();
     let stdin = Arc::new(Mutex::new(child.stdin.take()));
     let stdout = child.stdout.take().unwrap();
     let stderr = child.stderr.take().unwrap();
     let status = Arc::new(std::sync::Mutex::new(ServerStatus::Starting));
     let players = Arc::new(std::sync::Mutex::new((0u32, 20u32)));
+    let pid_arc = Arc::new(std::sync::Mutex::new(child_pid));
+    let stopping_arc = Arc::new(std::sync::Mutex::new(false));
 
     {
         let mut processes = state.processes.lock().await;
@@ -816,6 +834,8 @@ pub async fn start_server(
                 stdin: stdin.clone(),
                 status: status.clone(),
                 players: players.clone(),
+                pid: pid_arc.clone(),
+                stopping: stopping_arc.clone(),
             },
         );
     }
@@ -837,7 +857,9 @@ pub async fn start_server(
     let app_c = app_handle.clone();
     let status_c = status.clone();
     let players_c = players.clone();
+    let stopping_c = stopping_arc.clone();
     let procs_arc = Arc::clone(&state.processes);
+    let config_path_c = state.config_path(&id);
 
     tokio::spawn(async move {
         let mut reader = BufReader::new(stdout).lines();
@@ -875,6 +897,7 @@ pub async fn start_server(
         }
 
         // stdout closed — process exited
+        let was_stopping = *stopping_c.lock().unwrap();
         {
             let mut st = status_c.lock().unwrap();
             *st = ServerStatus::Stopped;
@@ -894,6 +917,22 @@ pub async fn start_server(
                 },
             )
             .ok();
+
+        // Auto-restart if crash (not intentional stop)
+        if !was_stopping {
+            if let Ok(raw) = tokio::fs::read_to_string(&config_path_c).await {
+                if let Ok(cfg) = serde_json::from_str::<ServerConfig>(&raw) {
+                    if cfg.auto_restart {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                        app_c.emit("server-log", &LogEvent {
+                            server_id: id_c.clone(),
+                            line: "[Launchstone] Server crashed — auto-restarting in 5s...".to_string(),
+                            level: "WARN".to_string(),
+                        }).ok();
+                    }
+                }
+            }
+        }
     });
 
     // Spawn task for stderr (emit as WARN level)
@@ -920,6 +959,79 @@ pub async fn start_server(
         let _ = child.wait().await;
     });
 
+    // Scheduled task runner — polls every 60s while server is running
+    let id_sched = id.clone();
+    let app_sched = app_handle.clone();
+    let procs_sched = Arc::clone(&state.processes);
+    let server_dir_sched = state.server_dir(&id);
+    let stdin_sched = stdin.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            let is_running = {
+                let procs = procs_sched.lock().await;
+                if let Some(proc) = procs.get(&id_sched) {
+                    proc.status.lock().unwrap().clone() == ServerStatus::Running
+                } else {
+                    false
+                }
+            };
+            if !is_running { break; }
+
+            let tasks_path = server_dir_sched.join("launchstone_tasks.json");
+            let Ok(raw) = tokio::fs::read_to_string(&tasks_path).await else { continue; };
+            let Ok(mut tasks) = serde_json::from_str::<Vec<ScheduledTask>>(&raw) else { continue; };
+            let now = chrono::Utc::now();
+            let mut changed = false;
+
+            for task in tasks.iter_mut() {
+                if !task.enabled { continue; }
+                let should_run = if let Some(ref last) = task.last_run {
+                    if let Ok(last_dt) = chrono::DateTime::parse_from_rfc3339(last) {
+                        let elapsed = now.signed_duration_since(last_dt.with_timezone(&chrono::Utc));
+                        elapsed.num_minutes() >= task.interval_minutes as i64
+                    } else { true }
+                } else { true };
+
+                if should_run {
+                    task.last_run = Some(now.to_rfc3339());
+                    changed = true;
+                    match &task.action {
+                        ScheduledAction::Command { command } => {
+                            let cmd = format!("{}\n", command);
+                            let mut guard = stdin_sched.lock().await;
+                            if let Some(ref mut s) = *guard {
+                                let _ = s.write_all(cmd.as_bytes()).await;
+                            }
+                            app_sched.emit("server-log", &LogEvent {
+                                server_id: id_sched.clone(),
+                                line: format!("[Scheduler] Ran: {}", command),
+                                level: "INFO".to_string(),
+                            }).ok();
+                        }
+                        ScheduledAction::Restart => {
+                            app_sched.emit("server-log", &LogEvent {
+                                server_id: id_sched.clone(),
+                                line: "[Scheduler] Triggering scheduled restart...".to_string(),
+                                level: "WARN".to_string(),
+                            }).ok();
+                            let mut guard = stdin_sched.lock().await;
+                            if let Some(ref mut s) = *guard {
+                                let _ = s.write_all(b"stop\n").await;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if changed {
+                if let Ok(json) = serde_json::to_string_pretty(&tasks) {
+                    let _ = tokio::fs::write(&tasks_path, json).await;
+                }
+            }
+        }
+    });
+
     Ok(())
 }
 
@@ -933,6 +1045,10 @@ pub async fn stop_server(
         {
             let mut st = proc.status.lock().unwrap();
             *st = ServerStatus::Stopping;
+        }
+        {
+            let mut stopping = proc.stopping.lock().unwrap();
+            *stopping = true;
         }
         let mut stdin_guard = proc.stdin.lock().await;
         if let Some(ref mut stdin) = *stdin_guard {
@@ -1309,4 +1425,492 @@ pub async fn open_server_file(
         .opener()
         .open_path(canonical_target.to_string_lossy(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+// ─── resource monitor ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_server_resources(
+    id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<ResourceUsage, String> {
+    use sysinfo::{Pid, ProcessesToUpdate};
+
+    let pid_opt = {
+        let procs = state.processes.lock().await;
+        procs.get(&id).and_then(|p| *p.pid.lock().unwrap())
+    };
+    let Some(pid) = pid_opt else {
+        return Ok(ResourceUsage { cpu_percent: 0.0, ram_mb: 0 });
+    };
+
+    let (cpu, ram_mb) = {
+        let mut sys = state.sys.lock().unwrap();
+        sys.refresh_processes(ProcessesToUpdate::Some(&[Pid::from(pid as usize)]), true);
+        if let Some(proc) = sys.process(Pid::from(pid as usize)) {
+            (proc.cpu_usage(), proc.memory() / 1024 / 1024)
+        } else {
+            (0.0, 0)
+        }
+    };
+
+    Ok(ResourceUsage { cpu_percent: cpu, ram_mb })
+}
+
+// ─── backups ──────────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_backups(
+    id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<BackupInfo>, String> {
+    let backups_dir = state.backups_dir(&id);
+    if !backups_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut rd = tokio::fs::read_dir(&backups_dir).await.map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".zip") { continue; }
+        let meta = entry.metadata().await.map_err(|e| e.to_string())?;
+        let created_at = meta.modified().ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .and_then(|d| {
+                use chrono::TimeZone;
+                chrono::Utc.timestamp_opt(d.as_secs() as i64, 0).single()
+            })
+            .map(|dt| dt.to_rfc3339())
+            .unwrap_or_default();
+        result.push(BackupInfo { name, size: meta.len(), created_at });
+    }
+    result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn create_backup(
+    id: String,
+    label: Option<String>,
+    state: tauri::State<'_, AppState>,
+    app_handle: AppHandle,
+) -> Result<BackupInfo, String> {
+    let server_dir = state.server_dir(&id);
+    if !server_dir.exists() {
+        return Err("server directory not found".to_string());
+    }
+    let backups_dir = state.backups_dir(&id);
+    tokio::fs::create_dir_all(&backups_dir).await.map_err(|e| e.to_string())?;
+
+    let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let name = if let Some(l) = label.filter(|s| !s.is_empty()) {
+        format!("{}-{}.zip", timestamp, l.replace(' ', "_"))
+    } else {
+        format!("{}.zip", timestamp)
+    };
+    let dest = backups_dir.join(&name);
+
+    app_handle.emit("backup-progress", serde_json::json!({
+        "server_id": id, "message": "Creating backup..."
+    })).ok();
+
+    let server_dir_c = server_dir.clone();
+    let dest_c = dest.clone();
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let file = std::fs::File::create(&dest_c).map_err(|e| e.to_string())?;
+        let mut zip = zip::ZipWriter::new(file);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        zip_dir_recursive(&mut zip, &server_dir_c, &server_dir_c, opts)
+            .map_err(|e| e.to_string())?;
+        zip.finish().map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e)?;
+
+    let meta = tokio::fs::metadata(&dest).await.map_err(|e| e.to_string())?;
+    let created_at = chrono::Utc::now().to_rfc3339();
+    app_handle.emit("backup-progress", serde_json::json!({
+        "server_id": id, "message": "Backup complete"
+    })).ok();
+
+    Ok(BackupInfo { name, size: meta.len(), created_at })
+}
+
+fn zip_dir_recursive<W: std::io::Write + std::io::Seek>(
+    zip: &mut zip::ZipWriter<W>,
+    dir: &Path,
+    base: &Path,
+    opts: zip::write::SimpleFileOptions,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let rel = path.strip_prefix(base)?;
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if path.is_dir() {
+            zip.add_directory(&format!("{}/", rel_str), opts)?;
+            zip_dir_recursive(zip, &path, base, opts)?;
+        } else {
+            zip.start_file(&rel_str, opts)?;
+            let mut f = std::fs::File::open(&path)?;
+            std::io::copy(&mut f, zip)?;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn delete_backup(
+    id: String,
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let path = state.backups_dir(&id).join(&name);
+    if !path.extension().map(|e| e == "zip").unwrap_or(false) {
+        return Err("invalid backup name".to_string());
+    }
+    tokio::fs::remove_file(&path).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn restore_backup(
+    id: String,
+    name: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    // Server must not be running
+    {
+        let procs = state.processes.lock().await;
+        if let Some(p) = procs.get(&id) {
+            let st = p.status.lock().unwrap().clone();
+            if st == ServerStatus::Running || st == ServerStatus::Starting {
+                return Err("Stop the server before restoring a backup".to_string());
+            }
+        }
+    }
+
+    let backup_path = state.backups_dir(&id).join(&name);
+    if !backup_path.extension().map(|e| e == "zip").unwrap_or(false) {
+        return Err("invalid backup name".to_string());
+    }
+    let server_dir = state.server_dir(&id);
+
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let file = std::fs::File::open(&backup_path).map_err(|e| e.to_string())?;
+        let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        archive.extract(&server_dir).map_err(|e| e.to_string())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ─── server properties ────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_server_properties(
+    id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PropertyEntry>, String> {
+    let path = state.server_dir(&id).join("server.properties");
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+    let mut result = Vec::new();
+    let mut pending_comment: Option<String> = None;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            pending_comment = Some(line.trim_start_matches('#').trim().to_string());
+        } else if let Some(eq) = line.find('=') {
+            let key = line[..eq].trim().to_string();
+            let value = line[eq + 1..].trim().to_string();
+            if !key.is_empty() {
+                result.push(PropertyEntry { key, value, comment: pending_comment.take() });
+            }
+        } else {
+            pending_comment = None;
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+pub async fn save_server_properties(
+    id: String,
+    props: Vec<PropertyEntry>,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let path = state.server_dir(&id).join("server.properties");
+    let mut content = String::from("#Minecraft server properties\n");
+    content.push_str(&format!("#{}\n", chrono::Utc::now().to_rfc3339()));
+    for p in &props {
+        if let Some(ref c) = p.comment {
+            content.push_str(&format!("# {}\n", c));
+        }
+        content.push_str(&format!("{}={}\n", p.key, p.value));
+    }
+    tokio::fs::write(&path, content).await.map_err(|e| e.to_string())
+}
+
+// ─── player lists ─────────────────────────────────────────────────────────────
+
+fn player_list_filename(list_type: &str) -> Result<&'static str, String> {
+    match list_type {
+        "whitelist" => Ok("whitelist.json"),
+        "ops" => Ok("ops.json"),
+        "banlist" => Ok("banned-players.json"),
+        _ => Err(format!("unknown list type: {}", list_type)),
+    }
+}
+
+#[tauri::command]
+pub async fn get_player_list(
+    id: String,
+    list_type: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<PlayerListEntry>, String> {
+    let filename = player_list_filename(&list_type)?;
+    let path = state.server_dir(&id).join(filename);
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    let result = entries.iter().filter_map(|v| {
+        let uuid = v["uuid"].as_str()?.to_string();
+        let name = v["name"].as_str()?.to_string();
+        let level = v["level"].as_u64().map(|l| l as u32);
+        let reason = v["reason"].as_str().map(String::from);
+        let expires = v["expires"].as_str().map(String::from);
+        Some(PlayerListEntry { uuid, name, level, reason, expires })
+    }).collect();
+    Ok(result)
+}
+
+#[tauri::command]
+#[tauri::command]
+pub async fn add_to_player_list(
+    id: String,
+    list_type: String,
+    username: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    if username.is_empty() || username.len() > 16 || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("invalid username".to_string());
+    }
+    let filename = player_list_filename(&list_type)?;
+    let filename = player_list_filename(&list_type)?;
+    let path = state.server_dir(&id).join(filename);
+
+    // Fetch UUID from Mojang
+    let mojang_url = format!("https://api.mojang.com/users/profiles/minecraft/{}", username);
+    let resp = reqwest::get(&mojang_url).await.map_err(|e| e.to_string())?;
+    let (uuid, real_name) = if resp.status().is_success() {
+        let data: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let raw_id = data["id"].as_str().unwrap_or("").to_string();
+        let formatted = if raw_id.len() == 32 {
+            format!("{}-{}-{}-{}-{}", &raw_id[0..8], &raw_id[8..12], &raw_id[12..16], &raw_id[16..20], &raw_id[20..])
+        } else { raw_id };
+        (formatted, data["name"].as_str().unwrap_or(&username).to_string())
+    } else {
+        (format!("offline-{}", username), username.clone())
+    };
+
+    let mut entries: Vec<serde_json::Value> = if path.exists() {
+        let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+        serde_json::from_str(&raw).unwrap_or_default()
+    } else { vec![] };
+
+    // Avoid duplicates
+    if entries.iter().any(|e| e["name"].as_str() == Some(&real_name)) {
+        return Ok(());
+    }
+
+    let entry = match list_type.as_str() {
+        "ops" => serde_json::json!({ "uuid": uuid, "name": real_name, "level": 4, "bypassesPlayerLimit": false }),
+        "banlist" => serde_json::json!({ "uuid": uuid, "name": real_name, "created": chrono::Utc::now().to_rfc3339(), "source": "Launchstone", "expires": "forever", "reason": "Banned by an operator." }),
+        _ => serde_json::json!({ "uuid": uuid, "name": real_name }),
+    };
+    entries.push(entry);
+
+    let json = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, json).await.map_err(|e| e.to_string())?;
+
+    // Send runtime command if server is running
+    let runtime_cmd = match list_type.as_str() {
+        "whitelist" => Some(format!("whitelist add {}", real_name)),
+        "ops" => Some(format!("op {}", real_name)),
+        "banlist" => Some(format!("ban {}", real_name)),
+        _ => None,
+    };
+    if let Some(cmd) = runtime_cmd {
+        let procs = state.processes.lock().await;
+        if let Some(proc) = procs.get(&id) {
+            let mut stdin_guard = proc.stdin.lock().await;
+            if let Some(ref mut stdin) = *stdin_guard {
+                let _ = stdin.write_all(format!("{}\n", cmd).as_bytes()).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_from_player_list(
+    id: String,
+    list_type: String,
+    uuid: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let filename = player_list_filename(&list_type)?;
+    let path = state.server_dir(&id).join(filename);
+    if !path.exists() { return Ok(()); }
+
+    let raw = tokio::fs::read_to_string(&path).await.map_err(|e| e.to_string())?;
+    let mut entries: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+    let removed_name = entries.iter().find(|e| e["uuid"].as_str() == Some(&uuid))
+        .and_then(|e| e["name"].as_str().map(String::from));
+    entries.retain(|e| e["uuid"].as_str() != Some(&uuid));
+
+    let json = serde_json::to_string_pretty(&entries).map_err(|e| e.to_string())?;
+    tokio::fs::write(&path, json).await.map_err(|e| e.to_string())?;
+
+    if let Some(name) = removed_name {
+        let runtime_cmd = match list_type.as_str() {
+            "whitelist" => Some(format!("whitelist remove {}", name)),
+            "ops" => Some(format!("deop {}", name)),
+            "banlist" => Some(format!("pardon {}", name)),
+            _ => None,
+        };
+        if let Some(cmd) = runtime_cmd {
+            let procs = state.processes.lock().await;
+            if let Some(proc) = procs.get(&id) {
+                let mut stdin_guard = proc.stdin.lock().await;
+                if let Some(ref mut stdin) = *stdin_guard {
+                    let _ = stdin.write_all(format!("{}\n", cmd).as_bytes()).await;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+// ─── file upload ──────────────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn upload_server_file(
+    id: String,
+    path: String,
+    content_b64: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    use base64::Engine;
+    let server_dir = state.server_dir(&id);
+    let file_path = server_dir.join(&path);
+    let canonical_server = server_dir.canonicalize().map_err(|e| e.to_string())?;
+    let parent = file_path.parent().ok_or("invalid path")?;
+    tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+    let canonical_parent = parent.canonicalize().map_err(|e| e.to_string())?;
+    if !canonical_parent.starts_with(&canonical_server) {
+        return Err("path traversal not allowed".to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(&content_b64)
+        .map_err(|e| e.to_string())?;
+    tokio::fs::write(&file_path, bytes).await.map_err(|e| e.to_string())
+}
+
+// ─── scheduled tasks ──────────────────────────────────────────────────────────
+
+fn tasks_path_for(server_dir: &Path) -> std::path::PathBuf {
+    server_dir.join("launchstone_tasks.json")
+}
+
+async fn load_tasks(server_dir: &Path) -> Vec<ScheduledTask> {
+    let p = tasks_path_for(server_dir);
+    if !p.exists() { return vec![]; }
+    let raw = tokio::fs::read_to_string(&p).await.unwrap_or_default();
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+async fn save_tasks(server_dir: &Path, tasks: &Vec<ScheduledTask>) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(tasks).map_err(|e| e.to_string())?;
+    tokio::fs::write(tasks_path_for(server_dir), json).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_scheduled_tasks(
+    id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ScheduledTask>, String> {
+    Ok(load_tasks(&state.server_dir(&id)).await)
+}
+
+#[tauri::command]
+pub async fn add_scheduled_task(
+    id: String,
+    task: ScheduledTask,
+    state: tauri::State<'_, AppState>,
+) -> Result<ScheduledTask, String> {
+    let server_dir = state.server_dir(&id);
+    let mut tasks = load_tasks(&server_dir).await;
+    let new_task = ScheduledTask {
+        id: uuid::Uuid::new_v4().to_string(),
+        last_run: None,
+        ..task
+    };
+    tasks.push(new_task.clone());
+    save_tasks(&server_dir, &tasks).await?;
+    Ok(new_task)
+}
+
+#[tauri::command]
+pub async fn update_scheduled_task(
+    id: String,
+    task: ScheduledTask,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let server_dir = state.server_dir(&id);
+    let mut tasks = load_tasks(&server_dir).await;
+    if let Some(t) = tasks.iter_mut().find(|t| t.id == task.id) {
+        *t = task;
+    }
+    save_tasks(&server_dir, &tasks).await
+}
+
+#[tauri::command]
+pub async fn remove_scheduled_task(
+    id: String,
+    task_id: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    let server_dir = state.server_dir(&id);
+    let mut tasks = load_tasks(&server_dir).await;
+    tasks.retain(|t| t.id != task_id);
+    save_tasks(&server_dir, &tasks).await
+}
+
+// ─── server config update ─────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn update_server(
+    id: String,
+    req: UpdateServerRequest,
+    state: tauri::State<'_, AppState>,
+) -> Result<ServerConfig, String> {
+    let config_path = state.config_path(&id);
+    let raw = tokio::fs::read_to_string(&config_path).await.map_err(|e| e.to_string())?;
+    let mut config: ServerConfig = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    config.name = req.name;
+    config.max_ram_mb = req.max_ram_mb;
+    config.auto_restart = req.auto_restart;
+    config.jvm_flags = req.jvm_flags;
+    let json = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
+    tokio::fs::write(&config_path, json).await.map_err(|e| e.to_string())?;
+    Ok(config)
 }

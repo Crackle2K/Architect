@@ -49,6 +49,10 @@ pub struct ServerConfig {
     pub max_ram_mb: u32,
     pub created_at: String,
     pub jar_name: String,
+    #[serde(default)]
+    pub auto_restart: bool,
+    #[serde(default)]
+    pub jvm_flags: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +71,18 @@ pub struct CreateServerRequest {
     pub minecraft_version: String,
     pub port: u16,
     pub max_ram_mb: u32,
+    #[serde(default)]
+    pub auto_restart: bool,
+    #[serde(default)]
+    pub jvm_flags: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateServerRequest {
+    pub name: String,
+    pub max_ram_mb: u32,
+    pub auto_restart: bool,
+    pub jvm_flags: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,4 +134,55 @@ pub struct FileEntry {
     pub is_dir: bool,
     pub size: u64,
     pub modified: String,
+}
+
+// ─── new types ────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BackupInfo {
+    pub name: String,
+    pub size: u64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ScheduledAction {
+    Command { command: String },
+    Restart,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScheduledTask {
+    pub id: String,
+    pub label: String,
+    pub interval_minutes: u32,
+    pub action: ScheduledAction,
+    pub enabled: bool,
+    pub last_run: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ResourceUsage {
+    pub cpu_percent: f32,
+    pub ram_mb: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerListEntry {
+    pub uuid: String,
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub level: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PropertyEntry {
+    pub key: String,
+    pub value: String,
+    pub comment: Option<String>,
 }

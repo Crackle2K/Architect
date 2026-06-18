@@ -79,6 +79,8 @@ export default function CreateServerModal({ onClose, onCreated }: Props) {
         minecraft_version: selectedVersion,
         port,
         max_ram_mb: ram,
+        auto_restart: false,
+        jvm_flags: "",
       };
       await createServer(req);
       onCreated();

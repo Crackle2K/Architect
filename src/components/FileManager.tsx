@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ChevronRight,
@@ -10,6 +10,7 @@ import {
   RefreshCw,
   Save,
   Trash2,
+  Upload,
   X,
 } from "lucide-react";
 import type { FileEntry } from "../types";
@@ -18,6 +19,7 @@ import {
   listServerFiles,
   openServerFile,
   readServerFile,
+  uploadServerFile,
   writeServerFile,
 } from "../lib/tauri";
 
@@ -224,6 +226,8 @@ export default function FileManager({ serverId }: Props) {
   const [loading, setLoading] = useState(true);
   const [editingEntry, setEditingEntry] = useState<FileEntry | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<FileEntry | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const uploadRef = useRef<HTMLInputElement>(null);
 
   const subpath = pathParts.length > 0 ? pathParts.join("/") : null;
 
@@ -251,6 +255,19 @@ export default function FileManager({ serverId }: Props) {
     } else {
       openServerFile(serverId, entry.path).catch(console.error);
     }
+  }
+
+  async function handleUpload(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    for (const file of Array.from(files)) {
+      const bytes = await file.arrayBuffer();
+      const b64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
+      const destPath = subpath ? `${subpath}/${file.name}` : file.name;
+      await uploadServerFile(serverId, destPath, b64).catch(console.error);
+    }
+    setUploading(false);
+    refresh();
   }
 
   async function handleDelete(entry: FileEntry) {
@@ -363,6 +380,22 @@ export default function FileManager({ serverId }: Props) {
           <RefreshCw size={12} />
           Refresh
         </button>
+
+        <button
+          onClick={() => uploadRef.current?.click()}
+          disabled={uploading}
+          style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", border: "1px solid var(--color-border)", borderRadius: 7, background: "transparent", color: "var(--color-text-secondary)", fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "inherit", opacity: uploading ? 0.6 : 1 }}
+        >
+          <Upload size={12} />
+          {uploading ? "Uploading…" : "Upload"}
+        </button>
+        <input
+          ref={uploadRef}
+          type="file"
+          multiple
+          style={{ display: "none" }}
+          onChange={e => handleUpload(e.target.files)}
+        />
 
         <button
           onClick={() => openServerFile(serverId, subpath).catch(console.error)}

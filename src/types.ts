@@ -1,4 +1,11 @@
-export type ServerType = "vanilla" | "paper" | "fabric" | "forge" | "quilt" | "neoforge";
+export type ServerType =
+  | "vanilla"
+  | "paper"
+  | "fabric"
+  | "forge"
+  | "quilt"
+  | "neoforge";
+
 export type ServerStatus = "stopped" | "starting" | "running" | "stopping";
 
 export interface ServerConfig {
@@ -10,6 +17,8 @@ export interface ServerConfig {
   max_ram_mb: number;
   created_at: string;
   jar_name: string;
+  auto_restart: boolean;
+  jvm_flags: string;
 }
 
 export interface ServerInfo extends ServerConfig {
@@ -29,6 +38,15 @@ export interface CreateServerRequest {
   minecraft_version: string;
   port: number;
   max_ram_mb: number;
+  auto_restart: boolean;
+  jvm_flags: string;
+}
+
+export interface UpdateServerRequest {
+  name: string;
+  max_ram_mb: number;
+  auto_restart: boolean;
+  jvm_flags: string;
 }
 
 export interface LogEvent {
@@ -75,4 +93,42 @@ export interface AppSettings {
   default_ram_mb: number;
   default_port: number;
   show_snapshots: boolean;
+}
+
+export interface BackupInfo {
+  name: string;
+  size: number;
+  created_at: string;
+}
+
+export type ScheduledAction =
+  | { type: "command"; command: string }
+  | { type: "restart" };
+
+export interface ScheduledTask {
+  id: string;
+  label: string;
+  interval_minutes: number;
+  action: ScheduledAction;
+  enabled: boolean;
+  last_run: string | null;
+}
+
+export interface ResourceUsage {
+  cpu_percent: number;
+  ram_mb: number;
+}
+
+export interface PlayerListEntry {
+  uuid: string;
+  name: string;
+  level?: number;
+  reason?: string;
+  expires?: string;
+}
+
+export interface PropertyEntry {
+  key: string;
+  value: string;
+  comment?: string;
 }

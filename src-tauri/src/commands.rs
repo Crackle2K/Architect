@@ -1693,12 +1693,17 @@ pub async fn get_player_list(
 }
 
 #[tauri::command]
+#[tauri::command]
 pub async fn add_to_player_list(
     id: String,
     list_type: String,
     username: String,
     state: tauri::State<'_, AppState>,
 ) -> Result<(), String> {
+    if username.is_empty() || username.len() > 16 || !username.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err("invalid username".to_string());
+    }
+    let filename = player_list_filename(&list_type)?;
     let filename = player_list_filename(&list_type)?;
     let path = state.server_dir(&id).join(filename);
 
